@@ -4,11 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "tsx backend/server.ts",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "start": "node server.ts"
+    "start": "node backend/server.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

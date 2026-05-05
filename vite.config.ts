@@ -400,7 +400,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), expressPlugin()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(__dirname, './frontend'),
     },
   },
   server: {

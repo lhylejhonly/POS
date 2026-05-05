@@ -172,7 +172,7 @@ app.post('/api/products/bulk', async (req, res) => {
 
 // Checkout API
 app.post('/api/checkout', async (req, res) => {
-  const { items, total, payments, user_id, shift_id, customer_id, tax_amount } = req.body;
+  const { items, total, payments, user_id, shift_id, customer_id, tax_amount, points_redeemed } = req.body;
   
   try {
     const { data: transData, error: transError } = await supabase.from('transactions').insert({
@@ -181,11 +181,34 @@ app.post('/api/checkout', async (req, res) => {
       user_id,
       shift_id,
       customer_id,
-      tax_amount
+      tax_amount,
+      points_redeemed: points_redeemed || 0
     }).select().single();
 
     if (transError) throw transError;
     const transactionId = transData.id;
+
+    // ... (rest of transaction logic)
+    
+    // Loyalty Points Logic
+    if (customer_id) {
+      const { data: customer } = await supabase.from('customers').select('*').eq('id', customer_id).single();
+      if (customer) {
+        let newPoints = (customer.points || 0);
+        
+        // Deduct redeemed points
+        if (points_redeemed) {
+          newPoints -= points_redeemed;
+        }
+
+        // Award new points (1 point per ₱100 by default, or use a setting if available)
+        // Hardcoding to 1 point per ₱10 for better "demo" visibility if no setting
+        const pointsEarned = Math.floor(total / 10); 
+        newPoints += pointsEarned;
+
+        await supabase.from('customers').update({ points: Math.max(0, newPoints) }).eq('id', customer_id);
+      }
+    }
 
     const itemsToInsert = items.map((item: any) => ({
       transaction_id: transactionId,

@@ -18,7 +18,7 @@ const productSchema = z.object({
   supplier_id: z.number().optional()
 });
 
-type View = 'pos' | 'products' | 'transactions' | 'settings' | 'reports' | 'audit' | 'customers' | 'suppliers' | 'expenses';
+type View = 'dashboard' | 'pos' | 'products' | 'transactions' | 'settings' | 'reports' | 'audit' | 'customers' | 'suppliers' | 'expenses';
 
 export interface StoreSettings {
   store_name: string;
@@ -54,7 +54,7 @@ export function getProductThreshold(product: Product, settings: StoreSettings): 
 }
 
 export default function App() {
-  const [view, setView] = useState<View>('pos');
+  const [view, setView] = useState<View>('dashboard');
   const [user, setUser] = useState<{ id: number; username: string; role: string } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
@@ -342,12 +342,12 @@ export default function App() {
     setShowPayment(true);
   };
 
-  const onCompleteCheckout = async (payments: { type: string, amount: number }[]) => {
+  const onCompleteCheckout = async (payments: { type: string, amount: number }[], pointsRedeemed: number = 0) => {
     const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
     const tax = subtotal * (settings.tax_rate / 100);
     const total = subtotal + tax;
     try {
-      const { transactionId } = await api.checkout(cart, total, payments, user?.id, activeShift?.id, selectedCustomer?.id, tax);
+      const { transactionId } = await api.checkout(cart, total, payments, user?.id, activeShift?.id, selectedCustomer?.id, tax, pointsRedeemed);
       setLastTransactionId(transactionId);
       setShowReceipt(true);
       setCart([]);
@@ -369,19 +369,42 @@ export default function App() {
 
   const filteredProducts = useMemo(() => {
     let result = products;
-    const term = searchTerm.trim();
+    const term = searchTerm.trim().toLowerCase();
 
     if (term) {
-      if (term.startsWith('#')) {
-        // Tag-specific filtering
-        const tag = term.slice(1).toLowerCase();
-        result = products.filter(p => 
-          p.tags?.toLowerCase().split(',').some(t => t.trim().includes(tag)) ||
-          p.category?.toLowerCase().includes(tag)
-        );
-      } else {
-        // Fuzzy matching on name, description, and tags
-        const fuse = new Fuse(products, {
+      const parts = term.split(' ');
+      const searchParts: string[] = [];
+      let stockFilter: 'low' | 'out' | null = null;
+      const tagFilters: string[] = [];
+
+      parts.forEach(part => {
+        if (part === 'is:low-stock' || part === 'is:low') {
+          stockFilter = 'low';
+        } else if (part === 'is:out-of-stock' || part === 'is:out') {
+          stockFilter = 'out';
+        } else if (part.startsWith('#')) {
+          tagFilters.push(part.slice(1).toLowerCase());
+        } else {
+          searchParts.push(part);
+        }
+      });
+
+      if (stockFilter === 'low') {
+        result = result.filter(p => p.stock > 0 && p.stock <= (settings.low_stock_threshold || 10));
+      } else if (stockFilter === 'out') {
+        result = result.filter(p => p.stock <= 0);
+      }
+
+      if (tagFilters.length > 0) {
+        result = result.filter(p => {
+          const productTags = p.tags?.toLowerCase().split(',').map(t => t.trim()) || [];
+          return tagFilters.every(f => productTags.some(pt => pt.includes(f)));
+        });
+      }
+
+      const finalTerm = searchParts.join(' ');
+      if (finalTerm) {
+        const fuse = new Fuse(result, {
           keys: [
             { name: 'name', weight: 1.0 },
             { name: 'description', weight: 0.7 },
@@ -394,7 +417,7 @@ export default function App() {
           location: 0,
           includeMatches: true
         });
-        result = fuse.search(term).map(r => r.item);
+        result = fuse.search(finalTerm).map(r => r.item);
       }
     }
 
@@ -497,9 +520,19 @@ export default function App() {
           ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
           bg-white md:bg-white/50 border-r border-slate-100/50 backdrop-blur-md px-4 py-8 md:p-6
         `}>
-          <div className="mb-8 px-2 hidden md:block">
+          <div className="mb-4 px-2 hidden md:block">
             <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Main Menu</h2>
           </div>
+
+          <button 
+            onClick={() => { setView('dashboard'); setIsSidebarOpen(false); }}
+            className={`w-full rounded-2xl flex items-center gap-4 px-5 py-4 transition-all duration-300 group ${view === 'dashboard' ? 'bg-red-50 text-red-600 shadow-sm border-l-4 border-red-600' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50'}`}
+          >
+            <motion.div whileHover={{ scale: 1.1, rotate: -5 }} transition={{ type: "spring", stiffness: 400, damping: 10 }}>
+              <TrendingUp className="w-5 h-5 shrink-0" />
+            </motion.div>
+            <span className="text-sm font-black uppercase tracking-widest group-hover:translate-x-1 transition-transform">Dashboard</span>
+          </button>
 
           <button 
             onClick={() => { setView('pos'); setIsSidebarOpen(false); }}
@@ -602,7 +635,9 @@ export default function App() {
           </button>
         </nav>
 
-        {view === 'pos' ? (
+        {view === 'dashboard' ? (
+          <Dashboard products={products} settings={settings} user={user} setView={setView} />
+        ) : view === 'pos' ? (
           <div className="flex-1 flex gap-4 overflow-hidden">
             {/* Catalog Grid */}
             <div className="flex-1 flex flex-col overflow-hidden gap-4">
@@ -969,8 +1004,10 @@ export default function App() {
           <ExpenseManager user={user} />
         ) : view === 'settings' ? (
           <SettingsManager settings={settings} onSave={loadSettings} />
+        ) : view === 'reports' ? (
+          <ReportsView products={products} settings={settings} />
         ) : (
-          <ReportsView products={products} settings={settings} user={user} />
+          <Dashboard products={products} settings={settings} user={user} setView={setView} />
         )}
       </main>
 
@@ -1571,13 +1608,17 @@ function TransactionHistory({ onRefresh }: { onRefresh: () => void }) {
   );
 }
 
-function PaymentModal({ total, onClose, onComplete }: { total: number, onClose: () => void, onComplete: (payments: { type: string, amount: number }[]) => void }) {
+function PaymentModal({ total, selectedCustomer, onClose, onComplete }: { total: number, selectedCustomer?: Customer | null, onClose: () => void, onComplete: (payments: { type: string, amount: number }[], pointsRedeemed: number) => void }) {
   const [payments, setPayments] = useState<{ type: string, amount: number }[]>([]);
   const [selectedType, setSelectedType] = useState<string>('cash');
-  const [amountInput, setAmountInput] = useState<string>(total.toFixed(2));
+  const [pointsRedeemed, setPointsRedeemed] = useState(0);
   
+  const discountFromPoints = pointsRedeemed; // 1 point = ₱1
+  const totalAfterPoints = Math.max(0, total - discountFromPoints);
   const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
-  const remaining = Math.max(0, total - totalPaid);
+  const remaining = Math.max(0, totalAfterPoints - totalPaid);
+
+  const [amountInput, setAmountInput] = useState<string>(remaining.toFixed(2));
 
   useEffect(() => {
     setAmountInput(remaining.toFixed(2));
@@ -1595,21 +1636,17 @@ function PaymentModal({ total, onClose, onComplete }: { total: number, onClose: 
     setPayments(prev => prev.filter((_, i) => i !== index));
   };
 
-  const paymentTypes = [
-    { id: 'cash', label: 'Cash', icon: Banknote, color: 'bg-emerald-500' },
-    { id: 'card', label: 'Credit Card', icon: CreditCard, color: 'bg-blue-500' },
-    { id: 'mobile', label: 'Mobile Pay', icon: Smartphone, color: 'bg-purple-500' },
-  ];
-
   const handleFinalize = () => {
     if (remaining > 0.01) {
       if (confirm(`Outstanding balance: ₱${remaining.toFixed(2)}. Complete as ${selectedType}?`)) {
-        onComplete([...payments, { type: selectedType, amount: remaining }]);
+        onComplete([...payments, { type: selectedType, amount: remaining }], pointsRedeemed);
       }
     } else {
-      onComplete(payments);
+      onComplete(payments, pointsRedeemed);
     }
   };
+
+  const maxRedeemable = selectedCustomer ? Math.min(selectedCustomer.points || 0, Math.floor(total)) : 0;
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xl z-[200] flex items-center justify-center p-4">
@@ -3440,7 +3477,217 @@ function LoginScreen({ onLogin, settings }: { onLogin: (user: any) => void, sett
   );
 }
 
-function ReportsView({ products, settings, user }: { products: Product[], settings: StoreSettings, user: any }) {
+function Dashboard({ products, settings, user, setView }: { products: Product[], settings: StoreSettings, user: any, setView: (v: View) => void }) {
+  const [salesData, setSalesData] = useState<any[]>([]);
+  const [profitData, setProfitData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  const lowStockItems = useMemo(() => {
+    return products.filter(p => p.stock < (settings.low_stock_threshold || 10));
+  }, [products, settings]);
+
+  const totalSalesToday = useMemo(() => {
+    const today = new Date().toISOString().split('T')[0];
+    return salesData.filter(s => s.date === today).reduce((acc, curr) => acc + curr.total, 0);
+  }, [salesData]);
+
+  const fetchDashboardData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [sales, profit] = await Promise.all([
+        api.getSalesReport(),
+        api.getProfitReport()
+      ]);
+      setSalesData(sales);
+      setProfitData(profit);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
+
+  if (loading) return (
+    <div className="flex-1 flex flex-col items-center justify-center text-slate-400">
+      <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}>
+        <Activity className="w-12 h-12 mb-4 opacity-20" />
+      </motion.div>
+      <p className="font-black uppercase tracking-[0.3em] text-[10px]">Loading Dashboard...</p>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 overflow-y-auto space-y-8 pb-20 scrollbar-hide">
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div>
+          <h2 className="text-3xl font-black text-slate-800 uppercase tracking-tight">Welcome back, {user.username}</h2>
+          <p className="text-slate-400 text-xs font-black uppercase tracking-[0.2em] mt-1">Here's what's happening at {settings.store_name} today.</p>
+        </div>
+        <button 
+          onClick={() => setView('pos')}
+          className="bg-red-600 hover:bg-red-500 text-white px-8 py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-xl shadow-red-200 transition-all active:scale-95 flex items-center gap-3"
+        >
+          <ShoppingCart className="w-4 h-4" /> Start New Sale
+        </button>
+      </header>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100/50">
+          <div className="p-3 bg-red-50 rounded-2xl w-fit mb-6">
+            <TrendingUp className="w-6 h-6 text-red-600" />
+          </div>
+          <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">Today's Revenue</div>
+          <div className="text-3xl font-black text-slate-800 tracking-tight">₱{totalSalesToday.toFixed(2)}</div>
+          <div className="mt-3 text-[9px] font-black text-emerald-500 flex items-center gap-1 uppercase tracking-widest">
+            <ArrowUp className="w-3 h-3" /> Live Transaction Flow
+          </div>
+        </div>
+
+        <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100/50">
+          <div className="p-3 bg-indigo-50 rounded-2xl w-fit mb-6">
+            <Package className="w-6 h-6 text-indigo-600" />
+          </div>
+          <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">Inventory Items</div>
+          <div className="text-3xl font-black text-slate-800 tracking-tight">{products.length}</div>
+          <div className="mt-3 text-[9px] font-black text-slate-400 space-x-2 uppercase tracking-widest">
+            <span className="text-rose-500">{lowStockItems.length} Low Stock</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100/50">
+          <div className="p-3 bg-emerald-50 rounded-2xl w-fit mb-6">
+            <Banknote className="w-6 h-6 text-emerald-600" />
+          </div>
+          <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">Period Profit</div>
+          <div className="text-3xl font-black text-slate-800 tracking-tight">₱{profitData?.net?.toFixed(2) || '0.00'}</div>
+          <div className="mt-3 text-[9px] font-black text-emerald-600 uppercase tracking-widest">
+            Net Earnings
+          </div>
+        </div>
+
+        <div className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100/50">
+          <div className="p-3 bg-amber-50 rounded-2xl w-fit mb-6">
+            <History className="w-6 h-6 text-amber-600" />
+          </div>
+          <div className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-2">System Health</div>
+          <div className="text-3xl font-black text-slate-800 tracking-tight">100%</div>
+          <div className="mt-3 text-[9px] font-black text-emerald-500 uppercase tracking-widest flex items-center gap-1">
+            <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div> Operational
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2 bg-white p-8 rounded-[3rem] shadow-sm border border-slate-100/50">
+          <div className="flex items-center justify-between mb-8">
+            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">Revenue Overview</h3>
+            <button onClick={() => setView('reports')} className="text-[10px] font-black text-red-600 uppercase tracking-widest hover:underline">Full Analytics</button>
+          </div>
+          <div className="h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={salesData.slice(-7)}>
+                <defs>
+                  <linearGradient id="colorTotalDash" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#dc2626" stopOpacity={0.1}/>
+                    <stop offset="95%" stopColor="#dc2626" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="date" stroke="#94a3b8" fontSize={10} axisLine={false} tickLine={false} />
+                <YAxis stroke="#94a3b8" fontSize={10} axisLine={false} tickLine={false} tickFormatter={(val) => `₱${val}`} />
+                <Tooltip contentStyle={{ borderRadius: '1.5rem', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
+                <Area type="monotone" dataKey="total" stroke="#dc2626" fillOpacity={1} fill="url(#colorTotalDash)" strokeWidth={3} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="bg-slate-900 rounded-[3rem] p-8 text-white shadow-xl shadow-slate-200 flex flex-col">
+          <h3 className="text-sm font-black uppercase tracking-widest mb-8 text-slate-400">Inventory Status</h3>
+          
+          <div className="flex-1 space-y-6">
+            <div>
+              <div className="flex justify-between text-[10px] font-black uppercase tracking-widest mb-3">
+                <span className="text-slate-400">Stock Health</span>
+                <span>{Math.round(((products.length - lowStockItems.length) / products.length) * 100)}%</span>
+              </div>
+              <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                <motion.div 
+                  initial={{ width: 0 }}
+                  animate={{ width: `${((products.length - lowStockItems.length) / products.length) * 100}%` }}
+                  className="h-full bg-red-600"
+                />
+              </div>
+            </div>
+
+            <div className="pt-6 space-y-4">
+              <h4 className="text-[10px] font-black text-rose-500 uppercase tracking-widest">Low Stock Alerts</h4>
+              {lowStockItems.slice(0, 4).map(item => (
+                <div key={item.id} className="flex items-center justify-between p-4 bg-white/5 rounded-2xl border border-white/5">
+                  <div className="flex-1">
+                    <p className="text-xs font-bold uppercase tracking-tight truncate">{item.name}</p>
+                    <p className="text-[9px] text-slate-500 font-black tracking-widest">{item.stock} LEFT • THRESHOLD: {settings.low_stock_threshold || 10}</p>
+                  </div>
+                  <button 
+                    onClick={() => setView('products')}
+                    className="p-2 bg-red-600/20 text-red-500 rounded-lg hover:bg-red-600/30 transition-colors"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+              {lowStockItems.length === 0 && (
+                <div className="text-center py-12">
+                  <Check className="w-10 h-10 text-emerald-500 opacity-20 mx-auto mb-4" />
+                  <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">All stock healthy</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <button 
+            onClick={() => setView('products')}
+            className="mt-8 w-full py-4 bg-white/10 hover:bg-white/20 text-white rounded-2xl font-black uppercase text-[10px] tracking-widest transition-all border border-white/5"
+          >
+            Manage Inventory
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <button onClick={() => setView('pos')} className="p-8 bg-emerald-50 hover:bg-emerald-100 rounded-[2.5rem] border border-emerald-100 transition-all group">
+          <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center mb-6 shadow-sm group-hover:scale-110 transition-transform">
+            <ShoppingCart className="w-6 h-6 text-emerald-600" />
+          </div>
+          <h4 className="font-black text-slate-800 uppercase tracking-tight text-left">POS Terminal</h4>
+          <p className="text-[10px] text-emerald-600 font-black uppercase tracking-widest mt-1 text-left">Process New Sales</p>
+        </button>
+
+        <button onClick={() => setView('audit')} className="p-8 bg-blue-50 hover:bg-blue-100 rounded-[2.5rem] border border-blue-100 transition-all group">
+          <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center mb-6 shadow-sm group-hover:scale-110 transition-transform">
+            <ClipboardCheck className="w-6 h-6 text-blue-600" />
+          </div>
+          <h4 className="font-black text-slate-800 uppercase tracking-tight text-left">Inventory Audit</h4>
+          <p className="text-[10px] text-blue-600 font-black uppercase tracking-widest mt-1 text-left">Stock Reconciliation</p>
+        </button>
+
+        <button onClick={() => setView('expenses')} className="p-8 bg-rose-50 hover:bg-rose-100 rounded-[2.5rem] border border-rose-100 transition-all group">
+          <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center mb-6 shadow-sm group-hover:scale-110 transition-transform">
+            <Banknote className="w-6 h-6 text-rose-600" />
+          </div>
+          <h4 className="font-black text-slate-800 uppercase tracking-tight text-left">Expenses</h4>
+          <p className="text-[10px] text-rose-600 font-black uppercase tracking-widest mt-1 text-left">Track Expenditures</p>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ReportsView({ products, settings }: { products: Product[], settings: StoreSettings }) {
   const [salesData, setSalesData] = useState<any[]>([]);
   const [popularData, setPopularData] = useState<any[]>([]);
   const [activityLogs, setActivityLogs] = useState<any[]>([]);
